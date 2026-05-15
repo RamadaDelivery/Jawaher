@@ -103,14 +103,31 @@ localStorage.setItem('jwSession', JSON.stringify({ user: u, role: ud.role, name:
         const isAdmin = this.role === 'Admin';
         const perms = this.userPerms || {};
 
-        // ── Page-level visibility ──────────────────────────────
-        const adminPages = ['warehouse','purchase','returns','definitions','logs','customers','users'];
+        // ── Map the 8 named permissions → which pages they unlock ─
+        const permPageMap = {
+            canManageStock:   ['warehouse'],
+            canManageReturns: ['returns'],
+            canViewReports:   ['reports'],
+            canExport:        [],   // action-only, no dedicated page
+            canDelete:        [],
+            canEditOrders:    [],
+            canMoveStatus:    [],
+            canSeePrices:     [],
+        };
+
+        // Build set of pages this user can access
+        const allowedPages = new Set();
+        if (!isAdmin) {
+            Object.entries(permPageMap).forEach(([perm, pages]) => {
+                if (perms[perm] === true) pages.forEach(p => allowedPages.add(p));
+            });
+        }
+
+        // ── Page-level visibility for .admin-only elements ──────
         document.querySelectorAll('.admin-only').forEach(el => {
             const page = el.dataset?.page;
             let show = isAdmin;
-            // Custom per-user page permission override
-            if (!isAdmin && page && perms.pages && perms.pages[page] === true) show = true;
-            if (page && perms.pages && perms.pages[page] === false) show = false;
+            if (!isAdmin && page && allowedPages.has(page)) show = true;
 
             if (show) {
                 if (el.classList.contains('nav-btn')) el.style.display = 'flex';
@@ -122,19 +139,16 @@ localStorage.setItem('jwSession', JSON.stringify({ user: u, role: ud.role, name:
         });
 
         // ── Action-level restrictions ──────────────────────────
-        // Delete button
         const canDelete = isAdmin || perms.canDelete === true;
         const delBtn = document.getElementById('modalDeleteBtn');
         if (delBtn) delBtn.style.display = canDelete ? '' : 'none';
 
-        // Export buttons (hide financial if restricted)
-        const canExport = isAdmin || perms.canExport !== false;
+        const canExport = isAdmin || perms.canExport === true;
         document.querySelectorAll('.export-btn').forEach(el => {
             el.style.display = canExport ? '' : 'none';
         });
 
-        // Price columns (data-level restriction)
-        const canSeePrices = isAdmin || perms.canSeePrices !== false;
+        const canSeePrices = isAdmin || perms.canSeePrices === true;
         if (!canSeePrices) {
             document.querySelectorAll('.price-cell,.kpi-emerald').forEach(el => {
                 el.style.filter = 'blur(5px)'; el.style.userSelect = 'none';
@@ -143,7 +157,11 @@ localStorage.setItem('jwSession', JSON.stringify({ user: u, role: ud.role, name:
 
         // ── Role-based default navigation ─────────────────────
         if (this.role === 'Delivery') { document.getElementById('rStatus').value = 'done'; this.gotoPage('reports'); }
-        else if (this.role === 'User') { this.gotoPage('entry'); }
+        else if (this.role === 'User') {
+            // If user has warehouse permission, go to dashboard; else entry
+            if (allowedPages.has('warehouse')) this.gotoPage('dashboard');
+            else this.gotoPage('entry');
+        }
         else { this.gotoPage('dashboard'); }
     },
 
@@ -215,7 +233,8 @@ onValue(purchasesRef, snap => { this.purchases = snap.val() || {}; this.updateCu
         // ── System Users listener (real-time RBAC + revocation) ──
         onValue(sysUsersRef, snap => {
             this.sysUsers = snap.val() || {};
-            this._checkSessionValid(); // check if current user got disabled
+            this._checkSessionValid();
+            this.updateEntryUserSelect(); // refresh entry user dropdown
             const active = document.querySelector('.page.active');
             if (active?.id === 'page-users' && this.role === 'Admin') this.renderUsersPage();
         });
@@ -256,9 +275,28 @@ onValue(purchasesRef, snap => { this.purchases = snap.val() || {}; this.updateCu
     updateEntryUserSelect() {
         const sel = document.getElementById('eEntryUser');
         if (!sel) return;
-        sel.innerHTML = this.entryUsers.map(u => `<option value="${u.name}">${u.name}</option>`).join('');
-        const me = this.entryUsers.find(u => u.name === this.userName);
-        if (me) sel.value = me.name;
+
+        const isAdmin = this.role === 'Admin';
+
+        if (isAdmin) {
+            // Admin sees all system users (Firebase + constants built-ins)
+            const builtInNames = ['المدير العام', 'باسل', 'موظف إدخال', 'عامل التوصيل'];
+            const fbNames = Object.values(this.sysUsers || {})
+                .filter(u => !u.disabled)
+                .map(u => u.name);
+            // Merge & deduplicate
+            const allNames = [...new Set([...builtInNames, ...fbNames])].sort();
+            sel.innerHTML = allNames.map(n => `<option value="${n}" ${n === this.userName ? 'selected' : ''}>${n}</option>`).join('');
+            // Pre-select current user
+            sel.value = this.userName;
+            sel.disabled = false;
+        } else {
+            // Non-admin: locked to their own name, non-editable
+            sel.innerHTML = `<option value="${this.userName}" selected>${this.userName}</option>`;
+            sel.value = this.userName;
+            sel.disabled = true;
+            sel.style.opacity = '.7';
+        }
     },
 
     updateItemSelects() {
@@ -1381,8 +1419,13 @@ async deductStock(orderId) {
         const pg = document.getElementById('rPage')?.value || '';
         const fr = document.getElementById('rFrom')?.value || '';
         const to = document.getElementById('rTo')?.value || '';
+
+        // User role: only sees their own orders (matched by userName)
+        const isUserOnly = this.role === 'User';
+
         return Object.entries(this.orders).filter(([id, o]) => {
-            // إضافة حماية للمتغيرات لتجنب توقف الصفحة
+            // ── Data-level restriction: User sees only their orders ──
+            if (isUserOnly && o.entryUser !== this.userName) return false;
             if (q && !((o.custName || '').toLowerCase().includes(q) || (o.custMob || '').includes(q) || id.includes(q))) return false;
             if (st && o.status !== st) return false;
             if (it && o.itemName !== it) return false;
