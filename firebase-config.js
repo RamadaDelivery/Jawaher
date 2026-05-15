@@ -28,6 +28,7 @@ export const returnsRef   = ref(db, FIREBASE_PATHS.returns);
 export const purchasesRef = ref(db, FIREBASE_PATHS.purchases);
 export const defPagesRef  = ref(db, FIREBASE_PATHS.defPages);
 export const defUsersRef  = ref(db, FIREBASE_PATHS.defUsers);
+export const sysUsersRef  = ref(db, 'jawaher_system_users');
 
 // ── Re-export Firebase helpers so app.js only imports from here ──
 export { ref, push, onValue, update, remove, get };
