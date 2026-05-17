@@ -1356,3 +1356,126 @@ tr.usr-disabled { opacity: .5; }
    ============================================================ */
 #auditBody tr:hover td { background: rgba(201,168,76,.03); }
 #auditBody td { vertical-align: top; }
+
+/* ============================================================
+   ITEM ROW CARDS — Redesigned
+   ============================================================ */
+
+.item-row-card {
+    background: var(--glass-card);
+    border: 1.5px solid var(--border);
+    border-right: 3px solid var(--gold);
+    border-radius: var(--radius-sm);
+    padding: .75rem 1rem;
+    margin-bottom: .6rem;
+    transition: border-color .2s;
+}
+.item-row-card:hover { border-right-color: var(--gold-dark); }
+
+/* Header: row number + delete */
+.item-row-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: .6rem;
+}
+.item-row-num {
+    font-size: .72rem;
+    font-weight: 800;
+    color: var(--ink-mid);
+    background: var(--paper-warm);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    width: 22px; height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.item-row-del {
+    font-size: .78rem !important;
+    padding: .3rem .7rem !important;
+}
+
+/* Fields grid */
+.item-row-fields {
+    display: grid;
+    grid-template-columns: 2fr 1.2fr 1.4fr 1fr;
+    gap: .6rem;
+    align-items: start;
+}
+
+@media (max-width: 600px) {
+    .item-row-fields {
+        grid-template-columns: 1fr 1fr;
+    }
+    .item-row-product { grid-column: span 2; }
+}
+
+/* ir-stock - fixed height, never shifts layout */
+.ir-stock {
+    height: 18px;
+    font-size: .72rem;
+    font-weight: 700;
+    margin-top: 3px;
+    line-height: 18px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Size select - wider */
+.item-row-size .select-wrapper select,
+.item-row-size .form-control-j {
+    min-width: 0;
+    width: 100%;
+}
+
+/* Qty control compact */
+.item-row-qty .qty-control {
+    gap: 4px;
+}
+.item-row-qty .qty-btn {
+    width: 30px;
+    height: 38px;
+    flex-shrink: 0;
+}
+.item-row-qty .qty-input {
+    width: 48px !important;
+    text-align: center;
+    padding: .4rem .2rem !important;
+}
+
+/* Add row button */
+.add-item-row-btn {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    font-size: .85rem;
+    color: var(--gold-dark);
+    font-weight: 700;
+    padding: .5rem .75rem;
+    border: 1.5px dashed var(--gold);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    cursor: pointer;
+    width: 100%;
+    justify-content: center;
+    transition: background .2s;
+    margin-top: .2rem;
+}
+.add-item-row-btn:hover { background: rgba(201,168,76,.07); }
+
+/* Color picker popup — ensure it's above everything */
+.color-picker-popup {
+    position: fixed;
+    z-index: 999999;
+    background: var(--paper);
+    border: 1.5px solid var(--gold);
+    border-radius: 12px;
+    padding: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    max-width: 220px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.4);
+}

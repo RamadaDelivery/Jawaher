@@ -547,11 +547,28 @@ if (targetId.startsWith('psc_')) {
             };
             popup.appendChild(el);
         });
-        // ... بقية كود عرض الـ popup كما هو
         document.body.appendChild(popup);
         const r = btn.getBoundingClientRect();
-        popup.style.top = (r.bottom + 6) + 'px';
-        popup.style.left = r.left + 'px';
+        // Position: prefer below, flip up if not enough space
+        const spaceBelow = window.innerHeight - r.bottom;
+        const popupH = Math.ceil(COLORS_AR.length / 6) * 36 + 16;
+        if (spaceBelow < popupH && r.top > popupH) {
+            popup.style.bottom = (window.innerHeight - r.top + 4) + 'px';
+        } else {
+            popup.style.top = (r.bottom + 6) + 'px';
+        }
+        popup.style.left = Math.max(4, r.left) + 'px';
+
+        // ── Close on outside click ──────────────────────────────
+        const closeHandler = (e) => {
+            if (!popup.contains(e.target) && e.target !== btn) {
+                popup.remove();
+                this._colorPickerOpen = null;
+                document.removeEventListener('mousedown', closeHandler, true);
+            }
+        };
+        // Small delay so the current click doesn't immediately close it
+        setTimeout(() => document.addEventListener('mousedown', closeHandler, true), 50);
     },
 
     _colorHex(name) {
@@ -648,53 +665,63 @@ addItemRow() {
         const container = document.getElementById('eItemsList');
         if (!container) return;
         container.innerHTML = this.itemRows.map((row, idx) => `
-            <div class="card-j p-3 mb-2" style="border-right:3px solid var(--gold)" id="itemrow_${idx}">
-                <div class="row g-2 align-items-end">
-                <div class="col-md-4">
-    <label class="form-label-j">المنتج <span style="color:var(--ruby-light)">*</span></label>
-    <input type="text" 
-           class="form-control-j ir-item" 
-           data-idx="${idx}"
-           id="ir_item_inp_${idx}"
-           placeholder="ابحث عن منتج..." 
-           autocomplete="off"
-           value="${row.savedItem || ''}"
-           oninput="app.onItemSearch(${idx}, this.value)"
-           onfocus="app.onItemSearch(${idx}, this.value)"
-           onblur="setTimeout(()=>app.closeItemDropdown(${idx}),200)">
-</div>                  
-                    <div class="col-md-2">
+            <div class="item-row-card" id="itemrow_${idx}">
+                <!-- Row header: number + delete -->
+                <div class="item-row-header">
+                    <span class="item-row-num">${idx + 1}</span>
+                    ${idx > 0 ? `<button class="btn-j btn-ruby btn-xs-j item-row-del" onclick="app.removeItemRow(${idx})">
+                        <i class="fas fa-times"></i> حذف
+                    </button>` : '<span></span>'}
+                </div>
+                <!-- Fields grid -->
+                <div class="item-row-fields">
+                    <!-- Product search -->
+                    <div class="item-row-field item-row-product">
+                        <label class="form-label-j">المنتج <span style="color:var(--ruby-light)">*</span></label>
+                        <input type="text"
+                               class="form-control-j ir-item"
+                               data-idx="${idx}"
+                               id="ir_item_inp_${idx}"
+                               placeholder="ابحث عن منتج..."
+                               autocomplete="off"
+                               value="${row.savedItem || ''}"
+                               oninput="app.onItemSearch(${idx}, this.value)"
+                               onfocus="app.onItemSearch(${idx}, this.value)"
+                               onblur="setTimeout(()=>app.closeItemDropdown(${idx}),200)">
+                    </div>
+                    <!-- Color -->
+                    <div class="item-row-field item-row-color">
                         <label class="form-label-j">اللون</label>
-                        <div style="display:flex;gap:4px;align-items:center">
+                        <div style="display:flex;gap:4px;align-items:stretch">
                             <input type="text" id="ir_color_${idx}" class="form-control-j ir-color" data-idx="${idx}"
                                 placeholder="اختر..." readonly value="${row.savedColor || ''}"
                                 data-hex="${row.savedColorHex || ''}"
-                                style="border-right:4px solid ${row.savedColorHex || 'var(--border)'};cursor:pointer;font-size:.82rem"
+                                style="border-right:4px solid ${row.savedColorHex || 'var(--border)'};cursor:pointer;font-size:.82rem;flex:1"
                                 onclick="app.openColorPicker(${idx},'ir_color')">
-                            <button id="ir_color_btn_${idx}" class="btn-j btn-ghost btn-xs-j" onclick="app.openColorPicker(${idx},'ir_color')" style="flex-shrink:0;padding:.3rem .5rem">
+                            <button id="ir_color_btn_${idx}" class="btn-j btn-ghost btn-xs-j" onclick="app.openColorPicker(${idx},'ir_color')" style="padding:.3rem .5rem">
                                 <i class="fas fa-palette" style="color:var(--gold)"></i>
                             </button>
                         </div>
                     </div>
-                    <div class="col-md-2">
+                    <!-- Size -->
+                    <div class="item-row-field item-row-size">
                         <label class="form-label-j">المقاس <span style="color:var(--ruby-light)">*</span></label>
                         <div class="select-wrapper">
                             <select class="form-control-j select-j ir-size" data-idx="${idx}">
                                 <option value="">المقاس</option>
                             </select>
                         </div>
-                        <div class="ir-stock" data-idx="${idx}" style="font-size:.72rem;margin-top:2px;color:var(--emerald)"></div>
+                        <!-- Stock below size - fixed height so it doesn't shift layout -->
+                        <div class="ir-stock" data-idx="${idx}"></div>
                     </div>
-                    <div class="col-md-2">
+                    <!-- Qty -->
+                    <div class="item-row-field item-row-qty">
                         <label class="form-label-j">الكمية</label>
                         <div class="qty-control">
                             <button class="qty-btn" onclick="app.adjustRowQty(${idx},-1)">−</button>
                             <input type="number" class="form-control-j qty-input ir-qty" data-idx="${idx}" value="${row.savedQty || 1}" min="1">
                             <button class="qty-btn" onclick="app.adjustRowQty(${idx},1)">+</button>
                         </div>
-                    </div>
-                    <div class="col-md-2 d-flex align-items-end">
-                        ${idx > 0 ? `<button class="btn-j btn-ruby btn-sm-j w-100" onclick="app.removeItemRow(${idx})"><i class="fas fa-times"></i> حذف</button>` : '<div></div>'}
                     </div>
                 </div>
             </div>
@@ -753,8 +780,17 @@ addItemRow() {
         const inp = document.querySelector(`.ir-item[data-idx="${idx}"]`);
         const dd = document.getElementById(`item_dd_${idx}`);
         if (inp) inp.value = name;
-        if (dd) dd.style.display = 'none';
+        if (dd) dd.remove();
         this.loadRowColors(idx);
+        // Auto-fill pageName in wizard state if item has a linked page
+        const wItem = this.warehouse[id];
+        if (wItem && wItem.pageName) {
+            // Update wizard state
+            if (this._wiz) this._wiz.pageName = wItem.pageName;
+            // Also update hidden/select field if exists
+            const pageSel = document.getElementById('ePageName') || document.getElementById('wiz_page');
+            if (pageSel && wItem.pageName) pageSel.value = wItem.pageName;
+        }
     },
 
     closeItemDropdown(idx) {
@@ -3411,12 +3447,15 @@ updateRetSizes(itemIdx) {
 
     _wizStepMobile(body) {
         body.innerHTML = this._wizLabel('رقم الموبايل') + `
-            <div style="display:flex;gap:.5rem;align-items:center">
-                <span style="background:var(--paper-warm);border:1.5px solid var(--border);border-radius:10px;padding:.85rem 1rem;font-size:1.1rem;font-weight:700;color:var(--ink-mid)">07</span>
-                <input type="text" id="wiz_mobile" class="form-control-j" style="font-size:1.2rem;padding:.85rem 1rem;flex:1" dir="ltr"
-                    placeholder="9 123 4567" maxlength="8" value="${this._wiz.mobile}"
-                    oninput="this.value=this.value.replace(/\D/g,'')"
+            <div style="display:flex;flex-direction:row-reverse;gap:.5rem;align-items:center" dir="ltr">
+                <span style="background:var(--paper-warm);border:1.5px solid var(--border);border-radius:10px;padding:.85rem 1rem;font-size:1.1rem;font-weight:700;color:var(--ink-mid);white-space:nowrap">07</span>
+                <input type="text" id="wiz_mobile" class="form-control-j" style="font-size:1.2rem;padding:.85rem 1rem;flex:1;text-align:left" dir="ltr"
+                    placeholder="9XXXXXXX" maxlength="8" value="${this._wiz.mobile}"
+                    oninput="this.value=this.value.replace(/\D/g,'');app._wizCheckDup(this.value)"
                     onkeydown="if(event.key==='Enter')app._wizNext()">
+            </div>
+            <div style="font-size:.75rem;color:var(--ink-mid);margin-top:.4rem;text-align:center">
+                مثال: 0798054014 ← أدخل الأرقام بعد 07 فقط
             </div>
             <div id="wiz_dup" style="margin-top:.75rem;font-size:.82rem;display:none"></div>`;
         // Check duplicate
@@ -3458,12 +3497,15 @@ updateRetSizes(itemIdx) {
     _wizStepProducts(body) {
         body.innerHTML = `<div style="font-size:1.3rem;font-weight:800;color:var(--ink);margin-bottom:1.25rem"><i class="fas fa-boxes" style="color:var(--gold)"></i> المنتجات</div>
         <div id="eItemsList" style="display:block"></div>
-        <button class="btn-j btn-ghost btn-sm-j mt-2" onclick="app.addItemRow()"><i class="fas fa-plus"></i> إضافة منتج آخر</button>`;
+        <button class="add-item-row-btn" onclick="app.addItemRow()">
+            <i class="fas fa-plus-circle" style="color:var(--gold)"></i> إضافة منتج آخر
+        </button>`;
         this.renderItemRows();
     },
 
     _wizStepPricing(body) {
         const pageOpts = this.pages.map(p => `<option value="${p.name}" ${this._wiz.pageName===p.name?'selected':''}>${p.name}</option>`).join('');
+        const hasAutoPage = !!this._wiz.pageName;
         body.innerHTML = this._wizLabel('السعر والمصدر') + `
             <div style="display:flex;gap:.75rem;align-items:center;margin-bottom:1.25rem">
                 <span style="background:var(--paper-warm);border:1.5px solid var(--border);border-radius:10px;padding:.75rem 1rem;font-size:1rem;font-weight:700;color:var(--ink-mid)">JOD</span>
@@ -3471,11 +3513,12 @@ updateRetSizes(itemIdx) {
                     placeholder="0.00" step="0.5" value="${this._wiz.price}"
                     onkeydown="if(event.key==='Enter')app._wizNext()">
             </div>
-            <div class="select-wrapper" style="margin-bottom:.75rem">
+            <div class="select-wrapper" style="margin-bottom:.5rem">
                 <select id="wiz_page" class="form-control-j select-j" style="font-size:1.05rem">
                     <option value="">اختر الصفحة المصدر...</option>${pageOpts}
                 </select>
             </div>
+            ${hasAutoPage ? `<div style="font-size:.75rem;color:var(--emerald);margin-bottom:.6rem"><i class="fas fa-link"></i> تم اقتراح الصفحة تلقائياً من المنتج المختار</div>` : ''}
             <input type="text" id="wiz_tags" class="form-control-j" style="font-size:.95rem;padding:.7rem 1rem"
                 placeholder="ملاحظات / Tags (اختياري)..." value="${this._wiz.tags}">`;
     },
