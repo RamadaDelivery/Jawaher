@@ -30,7 +30,8 @@ window.app = {
     itemRows: [],
     logsData: {},
     nimSizeRows: [],
-    sysUsers: {},   // Firebase-managed user accounts
+    sysUsers: {},
+    auditData: {},
 
     // ── Simple hash (SHA-256 via SubtleCrypto) ───────────────
     async _hash(str) {
@@ -202,7 +203,7 @@ localStorage.setItem('jwSession', JSON.stringify({ user: u, role: ud.role, name:
         document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === id));
 
         if (id === 'dashboard') this.renderDashboard();
-        if (id === 'entry') this.initItemRows();
+        if (id === 'entry') this.startWizard();
         if (id === 'orders') this.renderBoard();
         if (id === 'reports') { this.renderTable(); this.renderStageCards(); }
         if (id === 'warehouse') this.renderWarehouse();
@@ -213,6 +214,7 @@ localStorage.setItem('jwSession', JSON.stringify({ user: u, role: ud.role, name:
         if (id === 'movement')    this.renderMovementTable();
         if (id === 'customers')   { if (this.role === 'Admin') this.renderCustomers(); }
         if (id === 'users')       { if (this.role === 'Admin') this.renderUsersPage(); }
+        if (id === 'audit')       { if (this.role === 'Admin') this.renderAuditPage(); }
         this.closeAllDropdowns();
     },
 
@@ -346,6 +348,15 @@ localStorage.setItem('jwSession', JSON.stringify({ user: u, role: ud.role, name:
         window.addEventListener('offline', () => {
             this.toast('انقطع الاتصال — سيتم حفظ العمليات ومزامنتها لاحقاً', 'warning');
         });
+        // ── Audit trail listener (Admin only) ────────────────
+        if (this.role === 'Admin') {
+            onValue(ref(db, 'jawaher_audit'), snap => {
+                this.auditData = snap.val() || {};
+                const active = document.querySelector('.page.active');
+                if (active?.id === 'page-audit') this.renderAuditPage();
+            });
+        }
+
         // Flush any pending queue on startup
         setTimeout(() => this._offlineQueueFlush(), 3000);
     },
@@ -1218,6 +1229,7 @@ async updateOrder() {
             }
             await update(ref(db, `jawaher_orders/${id}`), payload);
             this.log('edit', id, 'تعديل بيانات الطلب');
+        this._auditLog('order_edit', id, before, updatedFields, `تعديل طلب ${o.custName}`);
             this.toast('تم حفظ التعديلات بنجاح ✓', 'success');
             this.closeModal('orderModal');
         } catch (err) {
@@ -1273,9 +1285,11 @@ async updateOrder() {
         this.openOrderModal(orderId);
     },
         async moveOrder(id, status) {
+        const before = { status: this.orders[id]?.status };
         await update(ref(db, `jawaher_orders/${id}`), { status });
         if (status === 'delivered') await this.deductStock(id);
         this.log('status', id, `تغيير الحالة إلى ${STATUS_AR[status]}`);
+        this._auditLog('order_edit', id, before, { status }, `تغيير حالة الطلب: ${STATUS_AR[before.status]} ← ${STATUS_AR[status]}`);
         this.toast('تم تغيير المرحلة', 'success'); this.closeModal('orderModal');
     },
 
@@ -1300,6 +1314,7 @@ async updateOrder() {
         await remove(ref(db, `jawaher_orders/${id}`));
         if (Object.keys(updates).length > 0) await update(ref(db), updates);
         this.log('delete', id, `حذف الطلب${o?.stockDeducted ? ' (تم إرجاع المخزون)' : ''}`);
+        this._auditLog('order_delete', id, o, null, `حذف طلب ${o?.custName || ''} | السعر: ${o?.price || 0} JOD`);
         this.toast('تم الحذف' + (o?.stockDeducted ? ' وإرجاع الكمية للمستودع' : ''), 'success');
         this.closeModal('orderModal');
     },
@@ -3294,6 +3309,415 @@ updateRetSizes(itemIdx) {
         this.log('user_delete', userId, 'حذف نهائي للمستخدم: ' + (u?.name || userId));
         this.toast('تم حذف المستخدم نهائياً', 'warning');
         this.renderUsersPage();
+    },
+
+
+    // ══════════════════════════════════════════════════════════
+    // ██╗    ██╗██╗███████╗ █████╗ ██████╗ ██████╗
+    // ██║    ██║██║╚══███╔╝██╔══██╗██╔══██╗██╔══██╗
+    // ██║ █╗ ██║██║  ███╔╝ ███████║██████╔╝██║  ██║
+    // ██║███╗██║██║ ███╔╝  ██╔══██║██╔══██╗██║  ██║
+    // ╚███╔███╔╝██║███████╗██║  ██║██║  ██║██████╔╝
+    //  ╚══╝╚══╝ ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝
+    // ════ TYPEFORM-STYLE ORDER WIZARD ════
+
+    // Wizard state
+    _wiz: { step: 0, items: [] },
+
+    // Steps definition
+    _wizSteps() {
+        return [
+            { key: 'custName',     label: 'اسم الزبون',         icon: 'fa-user' },
+            { key: 'mobile',       label: 'رقم الموبايل',       icon: 'fa-phone' },
+            { key: 'location',     label: 'الموقع والعنوان',    icon: 'fa-map-marker-alt' },
+            { key: 'products',     label: 'المنتجات',           icon: 'fa-boxes' },
+            { key: 'pricing',      label: 'السعر والمصدر',      icon: 'fa-tag' },
+            { key: 'confirm',      label: 'مراجعة وتأكيد',      icon: 'fa-check-circle' },
+        ];
+    },
+
+    startWizard() {
+        this._wiz = { step: 0, custName: '', mobile: '', governorate: 'العاصمة (عمّان)', addr: '', price: '', tags: '', pageName: '', entryUser: this.userName, items: [] };
+        this.itemRows = [{}];
+        document.getElementById('wiz-shell').style.display = 'flex';
+        document.getElementById('wiz-success').style.display = 'none';
+        this._wizRender();
+    },
+
+    _wizRender() {
+        const steps = this._wizSteps();
+        const s = this._wiz.step;
+        const total = steps.length;
+
+        // Progress
+        document.getElementById('wiz-step-label').textContent = steps[s].label;
+        document.getElementById('wiz-step-count').textContent = `${s + 1} من ${total}`;
+        document.getElementById('wiz-progress').style.width = `${((s + 1) / total) * 100}%`;
+
+        const body = document.getElementById('wiz-body');
+        const nav  = document.getElementById('wiz-nav');
+
+        body.innerHTML = '';
+        nav.innerHTML  = '';
+
+        // Render step content
+        switch (s) {
+            case 0: this._wizStepName(body); break;
+            case 1: this._wizStepMobile(body); break;
+            case 2: this._wizStepLocation(body); break;
+            case 3: this._wizStepProducts(body); break;
+            case 4: this._wizStepPricing(body); break;
+            case 5: this._wizStepConfirm(body); break;
+        }
+
+        // Nav buttons
+        if (s > 0) {
+            const back = document.createElement('button');
+            back.className = 'btn-j btn-ghost';
+            back.innerHTML = '<i class="fas fa-arrow-right"></i> تراجع';
+            back.onclick = () => { this._wiz.step--; this._wizRender(); };
+            nav.appendChild(back);
+        }
+        if (s < total - 1) {
+            const next = document.createElement('button');
+            next.className = 'btn-j btn-gold flex-fill';
+            next.style.fontSize = '1rem';
+            next.innerHTML = 'التالي <i class="fas fa-arrow-left"></i>';
+            next.onclick = () => this._wizNext();
+            nav.appendChild(next);
+        } else {
+            const save = document.createElement('button');
+            save.className = 'btn-j btn-emerald flex-fill';
+            save.style.fontSize = '1rem';
+            save.innerHTML = '<i class="fas fa-check-circle"></i> تأكيد وحفظ الطلب';
+            save.onclick = () => this._wizSave();
+            nav.appendChild(save);
+        }
+
+        // Auto-focus first input
+        setTimeout(() => { body.querySelector('input:not([type=hidden])') ?.focus(); }, 120);
+    },
+
+    _wizLabel(text, req = true) {
+        return `<div style="font-size:1.5rem;font-weight:800;color:var(--ink);margin-bottom:1.5rem;line-height:1.3">${text}${req ? ' <span style="color:var(--ruby-light)">*</span>' : ''}</div>`;
+    },
+
+    _wizStepName(body) {
+        body.innerHTML = this._wizLabel('ما اسم الزبون؟') + `
+            <input type="text" id="wiz_custName" class="form-control-j" style="font-size:1.2rem;padding:.85rem 1rem"
+                placeholder="الاسم الكامل..." value="${this._wiz.custName}"
+                onkeydown="if(event.key==='Enter')app._wizNext()">`;
+    },
+
+    _wizStepMobile(body) {
+        body.innerHTML = this._wizLabel('رقم الموبايل') + `
+            <div style="display:flex;gap:.5rem;align-items:center">
+                <span style="background:var(--paper-warm);border:1.5px solid var(--border);border-radius:10px;padding:.85rem 1rem;font-size:1.1rem;font-weight:700;color:var(--ink-mid)">07</span>
+                <input type="text" id="wiz_mobile" class="form-control-j" style="font-size:1.2rem;padding:.85rem 1rem;flex:1" dir="ltr"
+                    placeholder="9 123 4567" maxlength="8" value="${this._wiz.mobile}"
+                    oninput="this.value=this.value.replace(/\D/g,'')"
+                    onkeydown="if(event.key==='Enter')app._wizNext()">
+            </div>
+            <div id="wiz_dup" style="margin-top:.75rem;font-size:.82rem;display:none"></div>`;
+        // Check duplicate
+        if (this._wiz.mobile.length === 8) this._wizCheckDup(this._wiz.mobile);
+        document.getElementById('wiz_mobile')?.addEventListener('input', e => {
+            if (e.target.value.length === 8) this._wizCheckDup(e.target.value);
+        });
+    },
+
+    _wizCheckDup(mob) {
+        const full = '07' + mob;
+        const match = Object.values(this.orders).filter(o => o.custMob === full);
+        const box = document.getElementById('wiz_dup');
+        if (!box) return;
+        if (match.length > 0) {
+            const last = match.sort((a,b)=>b.timestamp-a.timestamp)[0];
+            box.style.display = 'block';
+            box.innerHTML = `<div style="background:rgba(201,168,76,.08);border:1px solid var(--gold);border-radius:10px;padding:.6rem .9rem">
+                <i class="fas fa-history" style="color:var(--gold)"></i>
+                زبون موجود: <strong>${last.custName}</strong> — آخر طلب: ${last.date}
+            </div>`;
+        } else {
+            box.style.display = 'none';
+        }
+    },
+
+    _wizStepLocation(body) {
+        const govs = ['العاصمة (عمّان)','إربد','الزرقاء','المفرق','البلقاء','الكرك','الطفيلة','معان','العقبة','جرش','عجلون','مادبا'];
+        const opts = govs.map(g => `<option value="${g}" ${this._wiz.governorate===g?'selected':''}>${g}</option>`).join('');
+        body.innerHTML = this._wizLabel('الموقع والعنوان') + `
+            <div class="select-wrapper" style="margin-bottom:1rem">
+                <select id="wiz_gov" class="form-control-j select-j" style="font-size:1.05rem">${opts}</select>
+            </div>
+            <input type="text" id="wiz_addr" class="form-control-j" style="font-size:1.05rem;padding:.85rem 1rem"
+                placeholder="المنطقة - الشارع - أقرب نقطة دالة..." value="${this._wiz.addr}"
+                onkeydown="if(event.key==='Enter')app._wizNext()">`;
+    },
+
+    _wizStepProducts(body) {
+        body.innerHTML = `<div style="font-size:1.3rem;font-weight:800;color:var(--ink);margin-bottom:1.25rem"><i class="fas fa-boxes" style="color:var(--gold)"></i> المنتجات</div>
+        <div id="eItemsList" style="display:block"></div>
+        <button class="btn-j btn-ghost btn-sm-j mt-2" onclick="app.addItemRow()"><i class="fas fa-plus"></i> إضافة منتج آخر</button>`;
+        this.renderItemRows();
+    },
+
+    _wizStepPricing(body) {
+        const pageOpts = this.pages.map(p => `<option value="${p.name}" ${this._wiz.pageName===p.name?'selected':''}>${p.name}</option>`).join('');
+        body.innerHTML = this._wizLabel('السعر والمصدر') + `
+            <div style="display:flex;gap:.75rem;align-items:center;margin-bottom:1.25rem">
+                <span style="background:var(--paper-warm);border:1.5px solid var(--border);border-radius:10px;padding:.75rem 1rem;font-size:1rem;font-weight:700;color:var(--ink-mid)">JOD</span>
+                <input type="number" id="wiz_price" class="form-control-j" style="font-size:1.3rem;font-weight:800;flex:1;padding:.75rem 1rem"
+                    placeholder="0.00" step="0.5" value="${this._wiz.price}"
+                    onkeydown="if(event.key==='Enter')app._wizNext()">
+            </div>
+            <div class="select-wrapper" style="margin-bottom:.75rem">
+                <select id="wiz_page" class="form-control-j select-j" style="font-size:1.05rem">
+                    <option value="">اختر الصفحة المصدر...</option>${pageOpts}
+                </select>
+            </div>
+            <input type="text" id="wiz_tags" class="form-control-j" style="font-size:.95rem;padding:.7rem 1rem"
+                placeholder="ملاحظات / Tags (اختياري)..." value="${this._wiz.tags}">`;
+    },
+
+    _wizStepConfirm(body) {
+        const items = this._wiz.collectedItems || [];
+        const itemHtml = items.map(it => `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:.5rem 0;border-bottom:1px solid var(--border)">
+                <div>
+                    <div style="font-weight:700;font-size:.9rem">${it.itemName}</div>
+                    <div style="font-size:.75rem;color:var(--ink-mid)">${it.itemColor} — ${it.size} × ${it.qty}</div>
+                </div>
+            </div>`).join('');
+        body.innerHTML = `
+            <div style="font-size:1.1rem;font-weight:800;color:var(--gold);margin-bottom:1.25rem"><i class="fas fa-clipboard-check"></i> مراجعة الطلب</div>
+            <div style="display:flex;flex-direction:column;gap:.6rem">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem">
+                    <div class="wiz-summary-row"><span class="wiz-summary-label">الزبون</span><span class="wiz-summary-val">${this._wiz.custName}</span></div>
+                    <div class="wiz-summary-row"><span class="wiz-summary-label">الموبايل</span><span class="wiz-summary-val" dir="ltr">07${this._wiz.mobile}</span></div>
+                    <div class="wiz-summary-row"><span class="wiz-summary-label">المحافظة</span><span class="wiz-summary-val">${this._wiz.governorate}</span></div>
+                    <div class="wiz-summary-row"><span class="wiz-summary-label">السعر</span><span class="wiz-summary-val" style="color:var(--emerald);font-weight:800">${this._wiz.price} JOD</span></div>
+                    <div class="wiz-summary-row col-span-2"><span class="wiz-summary-label">العنوان</span><span class="wiz-summary-val">${this._wiz.addr}</span></div>
+                    <div class="wiz-summary-row"><span class="wiz-summary-label">الصفحة</span><span class="wiz-summary-val">${this._wiz.pageName}</span></div>
+                    ${this._wiz.tags ? `<div class="wiz-summary-row"><span class="wiz-summary-label">ملاحظات</span><span class="wiz-summary-val">${this._wiz.tags}</span></div>` : ''}
+                </div>
+                <div style="margin-top:.5rem;font-weight:700;font-size:.85rem;color:var(--ink-mid)">المنتجات:</div>
+                ${itemHtml}
+            </div>`;
+    },
+
+    _wizNext() {
+        const s = this._wiz.step;
+        // Validate + collect
+        if (s === 0) {
+            const v = document.getElementById('wiz_custName')?.value.trim();
+            if (!v) { this._wizErr('يرجى إدخال اسم الزبون'); return; }
+            this._wiz.custName = v;
+        } else if (s === 1) {
+            const v = document.getElementById('wiz_mobile')?.value.replace(/\D/g,'');
+            if (v.length !== 8) { this._wizErr('رقم الموبايل يجب أن يكون 8 أرقام'); return; }
+            this._wiz.mobile = v;
+        } else if (s === 2) {
+            const gov  = document.getElementById('wiz_gov')?.value;
+            const addr = document.getElementById('wiz_addr')?.value.trim();
+            if (!addr) { this._wizErr('يرجى إدخال العنوان'); return; }
+            this._wiz.governorate = gov;
+            this._wiz.addr = addr;
+        } else if (s === 3) {
+            // Collect items from rows
+            const items = [];
+            const rows = document.querySelectorAll('.ir-item');
+            for (let i = 0; i < rows.length; i++) {
+                const itemName = rows[i].value;
+                const found = Object.entries(this.warehouse).find(([,w]) => w.name === itemName);
+                if (!found) { this._wizErr(`يرجى اختيار منتج للصف ${i+1}`); return; }
+                const sizeCombo = document.querySelector(`.ir-size[data-idx="${i}"]`)?.value;
+                const color = document.getElementById(`ir_color_${i}`)?.value || '';
+                const qty = parseInt(document.querySelector(`.ir-qty[data-idx="${i}"]`)?.value) || 1;
+                if (!sizeCombo || !color) { this._wizErr(`يرجى تحديد اللون والمقاس للصف ${i+1}`); return; }
+                const avail = found[1].sizes?.[sizeCombo] || 0;
+                if (qty > avail) { this._wizErr(`الكمية (${qty}) غير متوفرة لـ ${found[1].name}، المتوفر: ${avail}`); return; }
+                let finalSize = sizeCombo, finalColor = color;
+                if (sizeCombo.includes(' - ')) { finalSize = sizeCombo.split(' - ')[0]; finalColor = sizeCombo.split(' - ')[1]; }
+                items.push({ itemId: found[0], itemName: found[1].name, itemColor: finalColor, size: finalSize, exactKey: sizeCombo, qty });
+            }
+            if (items.length === 0) { this._wizErr('أضف منتجاً واحداً على الأقل'); return; }
+            this._wiz.collectedItems = items;
+        } else if (s === 4) {
+            const price = parseFloat(document.getElementById('wiz_price')?.value);
+            const page  = document.getElementById('wiz_page')?.value;
+            const tags  = document.getElementById('wiz_tags')?.value.trim() || '';
+            if (!price || price <= 0) { this._wizErr('يرجى إدخال السعر'); return; }
+            if (!page) { this._wizErr('يرجى اختيار الصفحة المصدر'); return; }
+            this._wiz.price = price;
+            this._wiz.pageName = page;
+            this._wiz.tags = tags;
+        }
+        this._wiz.step++;
+        this._wizRender();
+    },
+
+    _wizErr(msg) {
+        this.toast(msg, 'error');
+        document.getElementById('wiz-card')?.classList.add('wiz-shake');
+        setTimeout(() => document.getElementById('wiz-card')?.classList.remove('wiz-shake'), 400);
+    },
+
+    async _wizSave() {
+        const w = this._wiz;
+        const items = w.collectedItems || [];
+        if (items.length === 0) { this._wizErr('لا توجد منتجات'); return; }
+
+        const entryUser = this.role === 'User' ? this.userName : (w.entryUser || this.userName);
+        const payload = {
+            timestamp: Date.now(), date: new Date().toLocaleDateString('en-GB'),
+            custName: w.custName, custMob: '07' + w.mobile,
+            country: 'الأردن', governorate: w.governorate, custAddr: w.addr,
+            itemId: items[0].itemId, itemName: items[0].itemName,
+            itemColor: items[0].itemColor, size: items[0].size, exactKey: items[0].exactKey, qty: items[0].qty,
+            items, price: w.price, currency: 'JOD',
+            pageName: w.pageName, entryUser, tags: w.tags, status: 'new'
+        };
+
+        const btn = document.getElementById('wiz-nav')?.querySelector('button:last-child');
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جارٍ الحفظ...'; }
+
+        const newRef = await push(ordersRef, payload);
+        this.lastOrderId = newRef.key;
+        this.log('create', newRef.key, `إنشاء طلب للزبون: ${w.custName} | صفحة: ${w.pageName}`);
+        this._auditLog('order_create', newRef.key, null, payload, `طلب جديد للزبون ${w.custName}`);
+
+        // Show success screen
+        document.getElementById('wiz-shell').style.display = 'none';
+        const success = document.getElementById('wiz-success');
+        success.style.display = 'flex';
+        document.getElementById('wiz-success-summary').innerHTML = `
+            <div class="wiz-summary-row"><span class="wiz-summary-label">الزبون</span><span class="wiz-summary-val">${w.custName}</span></div>
+            <div class="wiz-summary-row"><span class="wiz-summary-label">الموبايل</span><span class="wiz-summary-val" dir="ltr">07${w.mobile}</span></div>
+            <div class="wiz-summary-row"><span class="wiz-summary-label">المحافظة</span><span class="wiz-summary-val">${w.governorate}</span></div>
+            <div class="wiz-summary-row"><span class="wiz-summary-label">السعر</span><span class="wiz-summary-val" style="color:var(--emerald);font-weight:800">${w.price} JOD</span></div>
+            ${items.map(it=>`<div class="wiz-summary-row"><span class="wiz-summary-label">${it.itemName}</span><span class="wiz-summary-val">${it.itemColor} — ${it.size} × ${it.qty}</span></div>`).join('')}`;
+        this.toast('تم حفظ الطلب بنجاح ✓', 'success');
+    },
+
+    // ══════════════════════════════════════════════════════════
+    // ██████╗     █████╗ ██╗   ██╗██████╗ ██╗████████╗
+    // ██╔══██╗   ██╔══██╗██║   ██║██╔══██╗██║╚══██╔══╝
+    // ██████╔╝   ███████║██║   ██║██║  ██║██║   ██║
+    // ██╔══██╗   ██╔══██║██║   ██║██║  ██║██║   ██║
+    // ██║  ██║   ██║  ██║╚██████╔╝██████╔╝██║   ██║
+    // ╚═╝  ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚═╝   ╚═╝
+    // ════ FINANCIAL AUDIT TRAIL ════
+
+    // _auditLog: detailed field-level change tracking
+    _auditLog(eventType, entityId, before, after, description) {
+        if (this.role !== 'Admin' && this.role !== 'User') return;
+
+        const changes = [];
+        const FIELD_LABELS = {
+            price:      'السعر',
+            status:     'الحالة',
+            custName:   'اسم الزبون',
+            custMob:    'رقم الموبايل',
+            custAddr:   'العنوان',
+            pageName:   'الصفحة',
+            entryUser:  'المدخل',
+            buyPrice:   'سعر الشراء',
+            sellPrice:  'سعر البيع',
+            qty:        'الكمية',
+            sizes:      'المخزون',
+            governorate:'المحافظة',
+            name:       'الاسم',
+            tags:       'الملاحظات',
+        };
+
+        // Compute field-level diff if both before/after provided
+        if (before && after) {
+            const allKeys = new Set([...Object.keys(before), ...Object.keys(after)]);
+            allKeys.forEach(k => {
+                if (['timestamp','items'].includes(k)) return;
+                const bVal = JSON.stringify(before[k] ?? '');
+                const aVal = JSON.stringify(after[k] ?? '');
+                if (bVal !== aVal) {
+                    changes.push({
+                        field: k,
+                        fieldLabel: FIELD_LABELS[k] || k,
+                        before: before[k],
+                        after: after[k]
+                    });
+                }
+            });
+        }
+
+        const entry = {
+            ts: Date.now(),
+            date: new Date().toLocaleString('ar-JO'),
+            user: this.userName,
+            role: this.role,
+            eventType,
+            entityId,
+            description,
+            changes,
+            ip: 'client', // placeholder
+        };
+
+        push(ref(db, 'jawaher_audit'), entry);
+    },
+
+    // Render audit trail page
+    renderAuditPage() {
+        if (this.role !== 'Admin') return;
+        const el = document.getElementById('auditBody'); if (!el) return;
+        const q   = document.getElementById('auditSearch')?.value.toLowerCase() || '';
+        const etF = document.getElementById('auditEventType')?.value || '';
+        const userF = document.getElementById('auditUserFilter')?.value || '';
+
+        const entries = Object.values(this.auditData || {})
+            .sort((a, b) => b.ts - a.ts)
+            .filter(e => {
+                if (q && !(e.description||'').toLowerCase().includes(q) && !(e.entityId||'').includes(q)) return false;
+                if (etF && e.eventType !== etF) return false;
+                if (userF && e.user !== userF) return false;
+                return true;
+            });
+
+        const eventColors = {
+            order_create: 'badge-done',
+            order_edit:   'badge-process',
+            order_delete: 'badge-canceled',
+            price_change: 'badge-postponed',
+            stock_change: 'badge-new',
+            user_action:  'badge-delivered',
+        };
+
+        el.innerHTML = entries.map(e => {
+            const changesHtml = e.changes?.length ? `
+                <div style="margin-top:.5rem;padding:.5rem .75rem;background:var(--paper-warm);border-radius:8px;border-right:3px solid var(--gold)">
+                    ${e.changes.map(c => `
+                        <div style="font-size:.75rem;display:flex;gap:.5rem;align-items:center;padding:.2rem 0;border-bottom:1px dashed var(--border)">
+                            <span style="font-weight:700;color:var(--ink-mid);min-width:90px">${c.fieldLabel}</span>
+                            <span style="color:var(--ruby-light);text-decoration:line-through;font-family:monospace">${this._auditVal(c.before)}</span>
+                            <i class="fas fa-long-arrow-alt-left" style="color:var(--gold);font-size:.6rem"></i>
+                            <span style="color:var(--emerald);font-weight:700;font-family:monospace">${this._auditVal(c.after)}</span>
+                        </div>`).join('')}
+                </div>` : '';
+            return `<tr>
+                <td style="font-size:.72rem;color:var(--ink-mid)" dir="ltr">${new Date(e.ts).toLocaleString('en-GB')}</td>
+                <td style="font-weight:700;font-size:.85rem">${e.user || ''}</td>
+                <td><span class="badge-j ${eventColors[e.eventType]||'badge-new'}" style="font-size:.7rem">${e.eventType||''}</span></td>
+                <td style="font-size:.78rem;color:var(--gold);font-family:monospace">${(e.entityId||'').slice(-8)}</td>
+                <td style="font-size:.82rem">
+                    ${e.description || ''}
+                    ${changesHtml}
+                </td>
+            </tr>`;
+        }).join('') || '<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--ink-mid)">لا توجد سجلات</td></tr>';
+    },
+
+    _auditVal(v) {
+        if (v === null || v === undefined) return '—';
+        if (typeof v === 'object') return JSON.stringify(v).slice(0, 40);
+        return String(v).slice(0, 50);
     },
 
 
