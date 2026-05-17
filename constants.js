@@ -51,6 +51,7 @@ export const RETURN_REASONS = [
 ];
 
 export const COLORS_AR = [
+    { name: 'متعدد الألوان', hex: 'linear-gradient(135deg,#ff0000,#ff7700,#ffff00,#00ff00,#0000ff,#8b00ff)', border: '#888', rainbow: true },
     { name: 'أبيض',       hex: '#FFFFFF', border: '#ddd'     },
     { name: 'أسود',       hex: '#1A1A1A', border: '#1A1A1A'  },
     { name: 'رمادي',      hex: '#808080', border: '#808080'  },

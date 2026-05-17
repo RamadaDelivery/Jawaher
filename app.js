@@ -217,13 +217,109 @@ localStorage.setItem('jwSession', JSON.stringify({ user: u, role: ud.role, name:
     },
 
     // ============ FIREBASE LISTENERS ============
+    // ── IndexedDB Cache helpers ───────────────────────────────
+    async _cacheInit() {
+        return new Promise((res, rej) => {
+            const req = indexedDB.open('JawaherCache', 1);
+            req.onupgradeneeded = e => {
+                const db = e.target.result;
+                if (!db.objectStoreNames.contains('data')) db.createObjectStore('data');
+                if (!db.objectStoreNames.contains('offlineQueue')) db.createObjectStore('offlineQueue', { autoIncrement: true });
+            };
+            req.onsuccess = e => { this._idb = e.target.result; res(); };
+            req.onerror = () => rej();
+        });
+    },
+
+    async _cacheSet(key, val) {
+        if (!this._idb) return;
+        return new Promise(res => {
+            const tx = this._idb.transaction('data', 'readwrite');
+            tx.objectStore('data').put(val, key);
+            tx.oncomplete = res;
+        });
+    },
+
+    async _cacheGet(key) {
+        if (!this._idb) return null;
+        return new Promise(res => {
+            const tx = this._idb.transaction('data', 'readonly');
+            const req = tx.objectStore('data').get(key);
+            req.onsuccess = () => res(req.result ?? null);
+            req.onerror = () => res(null);
+        });
+    },
+
+    async _offlineQueueAdd(path, data) {
+        if (!this._idb) return;
+        return new Promise(res => {
+            const tx = this._idb.transaction('offlineQueue', 'readwrite');
+            tx.objectStore('offlineQueue').add({ path, data, ts: Date.now() });
+            tx.oncomplete = res;
+        });
+    },
+
+    async _offlineQueueFlush() {
+        if (!this._idb) return;
+        const tx = this._idb.transaction('offlineQueue', 'readwrite');
+        const store = tx.objectStore('offlineQueue');
+        const all = await new Promise(res => { const r = store.getAll(); r.onsuccess = () => res(r.result); });
+        const keys = await new Promise(res => { const r = store.getAllKeys(); r.onsuccess = () => res(r.result); });
+        if (all.length === 0) return;
+        const updates = {};
+        all.forEach(item => { updates[item.path] = item.data; });
+        try {
+            await update(ref(db), updates);
+            // Clear queue on success
+            const tx2 = this._idb.transaction('offlineQueue', 'readwrite');
+            keys.forEach(k => tx2.objectStore('offlineQueue').delete(k));
+            if (all.length) this.toast(`تم مزامنة ${all.length} عملية محفوظة أثناء الانقطاع ✓`, 'success');
+        } catch(e) { /* keep in queue */ }
+    },
+
     startListeners() {
-        onValue(ordersRef, snap => { this.orders = snap.val() || {}; this.updateCurrentPage(); this.updateRItemFilter(); });
-        onValue(warehouseRef, snap => { this.warehouse = snap.val() || {}; this.updateItemSelects(); this.updateCurrentPage(); });
-        onValue(returnsRef, snap => { this.returns = snap.val() || {}; this.updateCurrentPage(); });
-onValue(purchasesRef, snap => { this.purchases = snap.val() || {}; this.updateCurrentPage(); });
+        // ── Load cached data immediately for instant UI ────────
+        this._cacheInit().then(async () => {
+            const cached = {
+                orders: await this._cacheGet('orders'),
+                warehouse: await this._cacheGet('warehouse'),
+                returns: await this._cacheGet('returns'),
+                purchases: await this._cacheGet('purchases'),
+                pages: await this._cacheGet('pages'),
+            };
+            if (cached.orders)    { this.orders    = cached.orders;    this.updateCurrentPage(); this.updateRItemFilter(); }
+            if (cached.warehouse) { this.warehouse  = cached.warehouse; this.updateItemSelects(); this.updateCurrentPage(); }
+            if (cached.returns)   { this.returns    = cached.returns;   this.updateCurrentPage(); }
+            if (cached.purchases) { this.purchases  = cached.purchases; this.updateCurrentPage(); }
+            if (cached.pages) {
+                this.pages = cached.pages;
+                this.updatePageSelect();
+            }
+        });
+
+        onValue(ordersRef, snap => {
+            this.orders = snap.val() || {};
+            this._cacheSet('orders', this.orders);
+            this.updateCurrentPage(); this.updateRItemFilter();
+        });
+        onValue(warehouseRef, snap => {
+            this.warehouse = snap.val() || {};
+            this._cacheSet('warehouse', this.warehouse);
+            this.updateItemSelects(); this.updateCurrentPage();
+        });
+        onValue(returnsRef, snap => {
+            this.returns = snap.val() || {};
+            this._cacheSet('returns', this.returns);
+            this.updateCurrentPage();
+        });
+        onValue(purchasesRef, snap => {
+            this.purchases = snap.val() || {};
+            this._cacheSet('purchases', this.purchases);
+            this.updateCurrentPage();
+        });
         onValue(defPagesRef, snap => {
             this.pages = snap.val() ? Object.entries(snap.val()).map(([id, v]) => ({ id, name: v.name })) : [];
+            this._cacheSet('pages', this.pages);
             this.updatePageSelect(); this.renderDefinitions();
         });
         onValue(defUsersRef, snap => {
@@ -241,6 +337,17 @@ onValue(purchasesRef, snap => { this.purchases = snap.val() || {}; this.updateCu
        if (this.role === 'Admin') {
     onValue(logsRef, snap => { this.logsData = snap.val() || {}; this.updateCurrentPage(); });
         }
+
+        // ── Online/offline detection + queue flush ─────────────
+        window.addEventListener('online', () => {
+            this.toast('عاد الاتصال بالإنترنت — جارٍ المزامنة...', 'success');
+            this._offlineQueueFlush();
+        });
+        window.addEventListener('offline', () => {
+            this.toast('انقطع الاتصال — سيتم حفظ العمليات ومزامنتها لاحقاً', 'warning');
+        });
+        // Flush any pending queue on startup
+        setTimeout(() => this._offlineQueueFlush(), 3000);
     },
 
     updateCurrentPage() {
@@ -391,13 +498,22 @@ const popup = document.createElement('div');
             if (availableColors && !availableColors.includes(c.name)) return;
             const el = document.createElement('div');
             el.title = c.name;
-            el.style.cssText = `width:28px;height:28px;border-radius:8px;background:${c.hex};border:2px solid ${c.border};cursor:pointer;transition:transform .15s`;
+            const bgStyle = c.hex.startsWith('linear-gradient') ? c.hex : c.hex;
+            el.style.cssText = `width:28px;height:28px;border-radius:8px;background:${bgStyle};border:2px solid ${c.border};cursor:pointer;transition:transform .15s`;
+            if (c.rainbow) el.style.outline = '2px solid transparent'; // rainbow marker
             el.onclick = () => {
                 const target = document.getElementById(targetId);
                 if (target) {
                     target.value = c.name;
                     target.dataset.hex = c.hex;
-                    target.style.borderRight = `4px solid ${c.hex}`;
+                    // For rainbow, use a rainbow border; else solid color
+                    if (c.rainbow) {
+                        target.style.borderRight = '4px solid transparent';
+                        target.style.borderImage = 'linear-gradient(#ff0000,#ff7700,#ffff00,#00ff00,#0000ff,#8b00ff) 1';
+                    } else {
+                        target.style.borderRight = `4px solid ${c.hex}`;
+                        target.style.borderImage = '';
+                    }
 if (targetId.startsWith('psc_')) {
     const idx = parseInt(targetId.split('_')[1]);
     if (app.pSizeData && app.pSizeData[idx]) {
@@ -430,7 +546,16 @@ if (targetId.startsWith('psc_')) {
     _colorHex(name) {
         if (!name) return null;
         if (name.startsWith('#')) return name;
-        return COLORS_AR.find(c => c.name === name)?.hex || null;
+        const found = COLORS_AR.find(c => c.name === name);
+        return found?.hex || null;
+    },
+
+    // Returns an inline style string for background (handles gradients)
+    _colorStyle(name) {
+        const hex = this._colorHex(name);
+        if (!hex) return 'background:#ccc';
+        if (hex.startsWith('linear-gradient')) return `background:${hex}`;
+        return `background:${hex}`;
     },
 
     filterSizesByColor(idx, colorName) {
@@ -730,8 +855,7 @@ addItemRow() {
         const pageName = document.getElementById('ePageName').value;
         const entryUser = document.getElementById('eEntryUser').value;
         const tags = document.getElementById('eTags').value.trim();
-        const weight = document.getElementById('eWeight').value.trim();
-        const height = document.getElementById('eHeight').value.trim();
+
 
         if (!custName) { this.toast('يرجى إدخال اسم الزبون', 'error'); return; }
        if (mob.length !== 8) { this.toast('رقم الموبايل يجب أن يكون 8 أرقام', 'error'); return; }
@@ -784,7 +908,7 @@ addItemRow() {
             custName, custMob: '07' + mob, country: 'الأردن', governorate: gov, custAddr: addr,
             itemId: items[0].itemId, itemName: items[0].itemName, itemColor: items[0].itemColor,
             size: items[0].size, exactKey: items[0].exactKey, qty: items[0].qty,
-       items, price, currency: 'JOD', weight, height, pageName, entryUser: entryUserFinal, tags, status: 'new'
+       items, price, currency: 'JOD', pageName, entryUser: entryUserFinal, tags, status: 'new'
         };
 
         const newRef = await push(ordersRef, payload);
@@ -796,7 +920,7 @@ addItemRow() {
     },
 
     resetOrderForm() {
-        ['eCustName', 'eCustMob', 'eAddr', 'eTags', 'ePrice', 'eWeight', 'eHeight', 'ePageNameCustom'].forEach(id => {
+        ['eCustName', 'eCustMob', 'eAddr', 'eTags', 'ePrice', 'ePageNameCustom'].forEach(id => {
             const el = document.getElementById(id); if (el) el.value = '';
         });
         const pageSel = document.getElementById('ePageName'); if (pageSel) pageSel.value = '';
@@ -1347,7 +1471,7 @@ async deductStock(orderId) {
                             </div>
                         </div>
 
-                        <!-- العمود الأيسر: اسم الصنف، الموديل (الصفحة)، الوزن، الطول، القيمة -->
+                        <!-- العمود الأيسر: اسم الصنف، الموديل، القيمة -->
                         <div style="display:flex;flex-direction:column;gap:2px;padding:3px">
                             <div style="background:#f9f9f9;border-radius:3px;padding:2px 5px;border:1px solid #eee">
                                 <div style="font-size:.48rem;color:#888">اسم الصنف</div>
@@ -1358,12 +1482,8 @@ async deductStock(orderId) {
                                 <div style="font-size:.68rem;font-weight:700">${items.map(it => it.itemColor || '').join('، ') || '-'}</div>
                             </div>
                             <div style="background:#f9f9f9;border-radius:3px;padding:2px 5px;border:1px solid #eee">
-                                <div style="font-size:.48rem;color:#888">الوزن</div>
-                                <div style="font-size:.72rem;font-weight:700">${o.weight || '-'}</div>
-                            </div>
-                            <div style="background:#f9f9f9;border-radius:3px;padding:2px 5px;border:1px solid #eee">
-                                <div style="font-size:.48rem;color:#888">الطول</div>
-                                <div style="font-size:.72rem;font-weight:700">${o.height || '-'}</div>
+                                <div style="font-size:.48rem;color:#888">المقاسات</div>
+                                <div style="font-size:.72rem;font-weight:700">${items.map(it => it.size||'').filter(Boolean).join('، ') || '-'}</div>
                             </div>
                             <div style="background:#fff8e6;border:1px solid #f0d080;border-radius:3px;padding:2px 5px;flex:1">
                                 <div style="font-size:.48rem;color:#888">القيمة</div>
@@ -3390,32 +3510,46 @@ document.addEventListener('DOMContentLoaded', () => {
     if (saved) {
         try {
             const s = JSON.parse(saved);
-            // Accept both constants.js users and Firebase users (check after sysUsers loads)
+
             const restoreSession = () => {
-                const ud = app.sysUsers[s.user] || USERS[s.user];
-                if (ud) {
-                    if (ud.disabled) { localStorage.removeItem('jwSession'); return; }
-                    app.user = s.user; app.role = s.role; app.userName = s.name;
-                    app.userPerms = app.sysUsers[s.user]?.perms || {};
-                    document.getElementById('authScreen').classList.remove('visible');
-                    document.getElementById('appContainer').style.display = 'block';
-                    document.getElementById('userName').textContent = s.name;
-                    document.getElementById('userRole').textContent = s.role;
-                    document.getElementById('userAvatar').textContent = s.name[0];
-                    document.getElementById('eDate').value = new Date().toLocaleDateString('en-GB');
-                    document.getElementById('dashDate').textContent = new Date().toLocaleDateString('ar-JO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-                    app.applyDark();
-                    app.applyPermissions();
-                    app.startListeners();
-                    app.updateCountry();
-                }
+                // constants.js users don't need Firebase
+                const builtIn = USERS[s.user];
+                const fbUser  = app.sysUsers[s.user];
+                const ud = builtIn || fbUser;
+                if (!ud) return;
+                if (ud.disabled) { localStorage.removeItem('jwSession'); return; }
+
+                app.user = s.user; app.role = s.role; app.userName = s.name;
+                app.userPerms = fbUser?.perms || {};
+                document.getElementById('authScreen').classList.remove('visible');
+                document.getElementById('appContainer').style.display = 'block';
+                document.getElementById('userName').textContent = s.name;
+                document.getElementById('userRole').textContent = s.role;
+                document.getElementById('userAvatar').textContent = s.name[0];
+                document.getElementById('eDate').value = new Date().toLocaleDateString('en-GB');
+                document.getElementById('dashDate').textContent = new Date().toLocaleDateString('ar-JO', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+                app.applyDark();
+                app.applyPermissions();
+                app.startListeners();
+                app.updateCountry();
             };
-            // Wait a tick for Firebase snapshot to arrive
-            setTimeout(restoreSession, 800);
+
+            // constants.js users: restore immediately
+            if (USERS[s.user]) {
+                restoreSession();
+            } else {
+                // Firebase users: short wait for snapshot
+                setTimeout(restoreSession, 600);
+            }
         } catch(e) { localStorage.removeItem('jwSession'); }
     }
     app.applyDark();
     app.initKeys();
+
+    // ── Register Service Worker (offline + cache) ─────────────
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
 
     document.getElementById('loginPass')?.addEventListener('keydown', e => { if (e.key === 'Enter') app.login(); });
 

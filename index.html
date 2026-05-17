@@ -29,6 +29,15 @@
 </head>
 
 <body>
+    <!-- Offline indicator -->
+    <div id="offlineBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99999;background:#8B4A1A;color:#fff;text-align:center;padding:.4rem;font-size:.82rem;font-weight:700">
+        <i class="fas fa-wifi-slash"></i> وضع عدم الاتصال — التغييرات ستُحفظ محلياً وتُزامَن عند عودة الإنترنت
+    </div>
+    <script>
+        window.addEventListener('offline', () => { document.getElementById('offlineBanner').style.display = 'block'; });
+        window.addEventListener('online',  () => { document.getElementById('offlineBanner').style.display = 'none'; });
+        if (!navigator.onLine) document.getElementById('offlineBanner').style.display = 'block';
+    </script>
 
     <!-- ══════════════════════════════════════════════════════
          INTRO SCREEN
@@ -271,14 +280,6 @@
                         <i class="fas fa-plus"></i> إضافة منتج آخر
                     </button>
                     <div class="row g-3 mb-3">
-                        <div class="col-md-3">
-                            <label class="form-label-j">الوزن الإجمالي</label>
-                            <input type="text" id="eWeight" class="form-control-j" placeholder="كغ">
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label-j">الطول</label>
-                            <input type="text" id="eHeight" class="form-control-j" placeholder="سم">
-                        </div>
                         <div class="col-md-3">
                             <label class="form-label-j">السعر شامل التوصيل <span style="color:var(--ruby-light)">*</span></label>
                             <div class="input-prefix">
