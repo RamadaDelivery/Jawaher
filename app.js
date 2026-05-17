@@ -3463,7 +3463,7 @@ updateRetSizes(itemIdx) {
         document.getElementById('wiz_mobile')?.addEventListener('input', e => {
             if (e.target.value.length === 8) this._wizCheckDup(e.target.value);
         });
-    }
+    },
 
     _wizCheckDup(mob) {
         const full = '07' + mob;
